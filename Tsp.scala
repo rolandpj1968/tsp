@@ -1,21 +1,91 @@
 /**
   * Travelling salesman problem tomfoolery.
   *   Nodes are represented by integers [0,N).
-  *   Distances are represented by a distance metric fn.
+  *   Edges are represented by a distance fn.
   */
-case class TspConfig(N: Int, d: (Int, Int) => Double) {
-  def length(path: Seq[Int]): Double = length(Path(path))
-  def length(path: Path): Double = path.length(d)
+case class Tsp(N: Int, d: (Int, Int) => Double) {
+  def edges(path: Seq[Int]): Seq[(Int, Int)] = path.zip(path.tail)
+
+  def length(path: Seq[Int]): Double = edges(path).foldLeft(0.0) { (partLen, edge) => partLen + d(edge._1, edge._2) }
 
   def shorterPath(p1: Seq[Int], p2: Seq[Int]): Seq[Int] = {
     if(length(p1) <= length(p2)) p1 else p2
   }
-}
 
-case class Path(nodes: Seq[Int]) {
-  def edges: Seq[(Int, Int)] = nodes.zip(nodes.tail)
+  /**
+    *  Generate all Hamiltonian cycles, starting and ending at node 0
+    */
+  def hamCycles: Iterator[Seq[Int]] = {
+    (1 to N-1).permutations.map { path => Seq(0) ++ path ++ Seq(0) }
+  }
 
-  def length(d: (Int, Int) => Double): Double = edges.foldLeft(0.0) { (partLen, edge) => partLen + d(edge._1, edge._2) }
+  def avgHamCycle: Double = {
+    hamCycles.foldLeft(0.0) { (sum, cycle) =>
+      sum + length(cycle)
+    } / hamCycles.size
+  }
+
+  /**
+    * Find the shortest cycle by brute force.
+    */
+  def bruteMinHamCycle: Seq[Int] = {
+    hamCycles.reduceLeft(shorterPath)
+  }
+
+  /**
+    *  Greedy cycle starting at the given node
+    */
+  def greedyHamCycle(n0: Int = 0): Seq[Int] = {
+    var i = n0
+    var nodesLeft = (0 to N-1).toSet - i
+    var path = Seq(i)
+    while(nodesLeft.nonEmpty) {
+      // Shortest next edge
+      val j = nodesLeft.reduceLeft { (n1, n2) =>
+        if(d(i, n1) <= d(i, n2)) n1 else n2
+      }
+      i = j
+      nodesLeft = nodesLeft - i
+      path = path :+ i
+    }
+    // Complete the cycle
+    path ++ Seq(n0)
+  }
+
+  /**
+    *  Best greedy cycle starting at any node
+    */
+  def bestGreedyHamCycle: Seq[Int] = {
+    (0 to N-1).map { n => greedyHamCycle(n) }.reduceLeft(shorterPath)
+  }
+
+  /**
+    * DP approach to TSP.
+    * Iteration 0 starts with all edges (0,j).
+    * Iteration M computes the shortest path for each set of size M of internal nodes, and each end-point end-point j.
+    *   This can be computed from the tableau of iteration M-1.
+    * Iteration N-1 gives us the shorted paths from 0 to all i, passing through all nodes.
+    * We can then trivially find the shortest cycle by adding the edge back to node 0 for all paths.
+    */
+  def dpMinHamCycle: Seq[Int] = {
+    val dpTab0 = (1 to N-1).map { k => (Set.empty[Int], k) -> Seq(0, k) }.toMap
+
+    // DP iterations - M is the size of the set of interior nodes of each path
+    val dpTab = (1 to N-2).foldLeft(dpTab0) { (dpTabM, M) =>
+      (1 to N-1).map { k =>
+        // Generate all combinations of nodes of length M, excluding node k
+        val nodesNotK = (1 to k-1) ++ (k+1 to N-1)
+        nodesNotK.combinations(M).map(_.toSet).map { comboM =>
+          // Choose the best path through comboM to k by iterating over paths to the node before k
+          (comboM, k) -> comboM.map { j => dpTabM(comboM-j, j) :+ k }.reduceLeft(shorterPath)
+        }
+      }.flatten.toMap
+    }
+
+    // Now we have the shortest paths from 0 to any i through all (other) nodes.
+    // Find the best hamilton cycle by closing the loop to 0 and finding the shortest one.
+    dpTab.values.map(_ :+ 0).reduceLeft(shorterPath)
+  }
 }
 
 case class ArrayMetric(a: Array[Array[Double]]) {
@@ -39,113 +109,6 @@ object MetricUtils {
 }
 
 object Tsp {
-  /**
-    *  Generate all Hamiltonian cycles, starting and ending at node 0
-    */
-  def hamCycles(N: Int): Iterator[Seq[Int]] = {
-    (1 to N-1).permutations.map { path => Seq(0) ++ path ++ Seq(0) }
-  }
-
-  def avgHamCycle(tsp: TspConfig): Double = {
-    hamCycles(tsp.N).foldLeft(0.0) { (sum, cycle) =>
-      sum + tsp.length(cycle)
-    } / hamCycles(tsp.N).size
-  }
-
-  /**
-    * Find the shortest cycle by brute force.
-    */
-  def minHamCycle(tsp: TspConfig): Seq[Int] = {
-    hamCycles(tsp.N).reduceLeft(tsp.shorterPath)
-  }
-
-  /**
-    *  Greedy cycle starting at the given node
-    */
-  def greedyHamCycle(tsp: TspConfig, n0: Int = 0): Seq[Int] = {
-    var i = n0
-    var nodesLeft = (0 to tsp.N-1).toSet - i
-    var path = Seq(i)
-    while(nodesLeft.nonEmpty) {
-      // Shortest next edge
-      val j = nodesLeft.reduceLeft { (n1, n2) =>
-        // println(s"        from $i: $i->$n1 = ${tsp.d(i, n1)} vs $i->$n2 = ${tsp.d(i, n2)}")
-        if(tsp.d(i, n1) <= tsp.d(i, n2)) n1 else n2
-      }
-      // println(s"    best was $i -> $j")
-      i = j
-      nodesLeft = nodesLeft - i
-      path = path :+ i
-    }
-    // Complete the cycle
-    path ++ Seq(n0)
-  }
-
-  /**
-    *  Best greedy cycle starting at any node
-    */
-  def bestGreedyHamCycle(tsp: TspConfig): Seq[Int] = {
-    (0 to tsp.N-1).map { n => greedyHamCycle(tsp, n) }.reduceLeft(tsp.shorterPath)
-  }
-
-
-  /**
-    * DP approach to TSP.
-    * Iteration 0 starts with all edges (0,j).
-    * Iteration M computes the shortest path for each set of size M of internal nodes, and each end-point end-point j.
-    *   This can be computed from the tableau of iteration M-1.
-    * Iteration N-1 gives us the shorted paths from 0 to all i, passing through all nodes.
-    * We can then trivially find the shortest cycle by adding the edge back to node 0 for all paths.
-    */
-  def dpMinHamCycle(tsp: TspConfig): Seq[Int] = {
-    import scala.collection.mutable.{Map => MMap}
-
-    // map: (internal-node-set, end-node k) -> shortest path (from node 0)
-    var tab: MMap[(Set[Int], Int), Seq[Int]] = {
-      var tab0: MMap[(Set[Int], Int), Seq[Int]] = MMap()
-      var emptySet: Set[Int] = Set()
-      for(k <- 1 to tsp.N-1) {
-        tab0((emptySet, k)) = Seq(0, k)
-      }
-      tab0
-    }
-    // M is the size of the set of interior nodes of each path
-    for(M <- 1 to tsp.N-2) {
-      val tabM: MMap[(Set[Int], Int), Seq[Int]] = MMap()
-      for(k <- 1 to tsp.N-1) {
-        // Generate all combinations of interior point of length M, excluding node k
-        val interiorNodes = (1 to k-1) ++ (k+1 to tsp.N-1)
-        interiorNodes.combinations(M).map(_.toSet).foreach { nodeSet =>
-          var minPathToKViaNodeset: Seq[Int] = Seq()
-          var minPathLength = Double.MaxValue
-          for(n <- nodeSet) {
-            val intNodesWithoutN = nodeSet - n
-            val minPathToN = tab((intNodesWithoutN, n))
-            val lengthToK = tsp.length(minPathToN) + tsp.d(n, k)
-            if(lengthToK < minPathLength) {
-              minPathToKViaNodeset = minPathToN :+ k
-              minPathLength = lengthToK
-            }
-          }
-          // Install into new tableau
-          tabM((nodeSet, k)) = minPathToKViaNodeset
-        }
-      }
-      // Finished this step, next...
-      tab = tabM
-    }
-    // Now we have the shortest paths from 0 to any i through all nodes.
-    // Find the best hamilton cycle by closing the loop to 0 and finding the shortest.
-    //println(s"tab N is $tab")
-    var minCycle: Seq[Int] = (0 to tsp.N-1) :+ 0
-    for((k, v) <- tab) {
-      val cycle = v :+ 0
-      if(tsp.length(cycle) < tsp.length(minCycle)) {
-        minCycle = cycle
-      }
-    }
-    minCycle
-  }
 
   def time[A](work: => A): A = {
     val startMs = System.currentTimeMillis
@@ -183,32 +146,32 @@ object Tsp {
 
   println("Random d(i,j)")
 
-  for(N <- 1 to 25) {
+  for(N <- 2 to 20) {
     println(s"----------------- N = $N --------------------")
     for (i <- 1 to 2) {
       println()
-      val tsp = TspConfig(N, MetricUtils.random(N))
+      val tsp = Tsp(N, MetricUtils.random(N))
       if(N <= MaxNForAvg) time {
-        val dAvg = avgHamCycle(tsp)
+        val dAvg = tsp.avgHamCycle
         println(f"   avg     $dAvg%.6f")
       }
       if(N <= MaxNForBrute) time {
-        val dMin = minHamCycle(tsp)
+        val dMin = tsp.bruteMinHamCycle
         val dMinLen = tsp.length(dMin)
         println(f"   min     $dMin -> $dMinLen%.6f")
       }
       if(N <= MaxNForDp) time {
-        val dDpMin = dpMinHamCycle(tsp)
+        val dDpMin = tsp.dpMinHamCycle
         val dDpMinLen = tsp.length(dDpMin)
         println(f"   dpMin   $dDpMin -> $dDpMinLen%.6f")
       }
       if(N <= MaxNForGreedy) time {
-        val dGreedy = greedyHamCycle(tsp)
+        val dGreedy = tsp.greedyHamCycle()
         val dGreedyLen = tsp.length(dGreedy)
         println(f"   greedy  $dGreedy -> $dGreedyLen%.6f")
       }
       if(N <= MaxNForGreedy) time {
-        val dBestGreedy = bestGreedyHamCycle(tsp)
+        val dBestGreedy = tsp.bestGreedyHamCycle
         val dBestGreedyLen = tsp.length(dBestGreedy)
         println(f"   greedyN $dBestGreedy -> $dBestGreedyLen%.6f")
       }
