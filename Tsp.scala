@@ -6,11 +6,7 @@
 case class Tsp(N: Int, d: (Int, Int) => Double) {
   def edges(path: Seq[Int]): Seq[(Int, Int)] = path.zip(path.tail)
 
-  def length(path: Seq[Int]): Double = edges(path).foldLeft(0.0) { (partLen, edge) => partLen + d(edge._1, edge._2) }
-
-  def shorterPath(p1: Seq[Int], p2: Seq[Int]): Seq[Int] = {
-    if(length(p1) <= length(p2)) p1 else p2
-  }
+  def length(path: Seq[Int]): Double = edges(path).map { case (n1, n2) => d(n1, n2) }.sum
 
   /**
     *  Generate all Hamiltonian cycles, starting and ending at node 0
@@ -19,18 +15,12 @@ case class Tsp(N: Int, d: (Int, Int) => Double) {
     (1 to N-1).permutations.map { path => Seq(0) ++ path ++ Seq(0) }
   }
 
-  def avgHamCycle: Double = {
-    hamCycles.foldLeft(0.0) { (sum, cycle) =>
-      sum + length(cycle)
-    } / hamCycles.size
-  }
+  def avgHamCycle: Double = hamCycles.map(length).sum / hamCycles.size
 
   /**
     * Find the shortest cycle by brute force.
     */
-  def bruteMinHamCycle: Seq[Int] = {
-    hamCycles.reduceLeft(shorterPath)
-  }
+  def bruteMinHamCycle: Seq[Int] = hamCycles.minBy(length)
 
   /**
     *  Greedy cycle starting at the given node
@@ -41,9 +31,7 @@ case class Tsp(N: Int, d: (Int, Int) => Double) {
     var path = Seq(i)
     while(nodesLeft.nonEmpty) {
       // Shortest next edge
-      val j = nodesLeft.reduceLeft { (n1, n2) =>
-        if(d(i, n1) <= d(i, n2)) n1 else n2
-      }
+      val j = nodesLeft.minBy { n => d(i, n) }
       i = j
       nodesLeft = nodesLeft - i
       path = path :+ i
@@ -56,7 +44,7 @@ case class Tsp(N: Int, d: (Int, Int) => Double) {
     *  Best greedy cycle starting at any node
     */
   def bestGreedyHamCycle: Seq[Int] = {
-    (0 to N-1).map { n => greedyHamCycle(n) }.reduceLeft(shorterPath)
+    (0 to N-1).map { n => greedyHamCycle(n) }.minBy(length)
   }
 
   /**
@@ -77,14 +65,14 @@ case class Tsp(N: Int, d: (Int, Int) => Double) {
         val nodesNotK = (1 to k-1) ++ (k+1 to N-1)
         nodesNotK.combinations(M).map(_.toSet).map { comboM =>
           // Choose the best path through comboM to k by iterating over paths to the node before k
-          (comboM, k) -> comboM.map { j => dpTabM(comboM-j, j) :+ k }.reduceLeft(shorterPath)
+          (comboM, k) -> comboM.map { j => dpTabM(comboM-j, j) :+ k }.minBy(length)
         }
       }.flatten.toMap
     }
 
     // Now we have the shortest paths from 0 to any i through all (other) nodes.
     // Find the best hamilton cycle by closing the loop to 0 and finding the shortest one.
-    dpTab.values.map(_ :+ 0).reduceLeft(shorterPath)
+    dpTab.values.map(_ :+ 0).minBy(length)
   }
 }
 
@@ -146,7 +134,7 @@ object Tsp {
 
   println("Random d(i,j)")
 
-  for(N <- 2 to 20) {
+  for(N <- 2 to 25) {
     println(s"----------------- N = $N --------------------")
     for (i <- 1 to 2) {
       println()
