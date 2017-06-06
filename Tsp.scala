@@ -174,53 +174,52 @@ case class Tsp(N: NodeT, d: (NodeT, NodeT) => DistanceT) {
     }
   }
 
-  abstract class PathGen(M: Int, from0: Boolean = false, to0: Boolean = false) {
+  case class PathData(head: NodeT, /*matchNodes: Set[NodeT],*/ last: NodeT, path: PathT)
+
+  def mkPathData(path: PathT) = PathData(path.head, path.last, path.toArray/*force to array*/)
+
+  /**
+    * M is the number of nodes in a path, i.e. M-1 edges.
+    */
+  abstract class PathGen(M: Int, from0: Boolean, to0: Boolean) {
+
     /**
       * @return the i'th shortest path of length M (or None if there are fewer than i paths)
       */
-    def getPath(i: Int): Option[PathT]
+    def getPath(i: Int): Option[PathData]
 
-    def dump: Unit = {
-      println(s"N = $N M = $M from0 = $from0 to0 = $to0:")
-      var i = 0
-      var done = false
-      while(!done) {
-        getPath(i) match {
-          case None => done = true
-          case Some(path) =>
-            println(f"     i = $i%2f len = ${length(path)}%.6f $path")
-            i = i+1
-        }
-      }
-    }
+    var dumped = false
 
+    def dump: Unit = {}
+
+    def dumpRec: Unit = {}
   }
 
-  class PathGenFromArray(M: Int, from0: Boolean, to0: Boolean, paths: Array[PathT])
+  class PathGenFromArray(M: Int, from0: Boolean, to0: Boolean, paths: Array[PathData])
       extends PathGen(M, from0, to0) {
 
-    override def getPath(i: Int): Option[PathT] = if(i < paths.size) Some(paths(i)) else None
+    override def getPath(i: Int): Option[PathData] = if(i < paths.size) Some(paths(i)) else None
   }
 
   /**
     * Single-edge paths in increasing order of length.
     */
-  class EdgesNon0 extends PathGenFromArray(M = 2, from0 = false, to0 = false, paths = edgesNon0.toArray.sortBy(length))
+  class EdgesNon0 extends PathGenFromArray(M = 2, from0 = false, to0 = false, paths = edgesNon0.toArray.sortBy(length).map(mkPathData))
 
   /**
     * Single-edge edges from 0 in increasing order of length.
     */
-  class EdgesFrom0 extends PathGenFromArray(M = 2, from0 = true, to0 = false, paths = (1 to N-1).map { i => Seq(0, i) }.toArray.sortBy(length))
+  class EdgesFrom0 extends PathGenFromArray(M = 2, from0 = true, to0 = false, paths = (1 to N-1).map { i => Seq(0, i) }.toArray.sortBy(length).map(mkPathData))
 
   /**
     * Single-edge edges from 0 in increasing order of length.
     */
-  class EdgesTo0 extends PathGenFromArray(M = 2, from0 = false, to0 = true, paths = (1 to N-1).map { i => Seq(i, 0) }.toArray.sortBy(length))
+  class EdgesTo0 extends PathGenFromArray(M = 2, from0 = false, to0 = true, paths = (1 to N-1).map { i => Seq(i, 0) }.toArray.sortBy(length).map(mkPathData))
 
   /**
     * Pathological case edge 0 to 0
     */
-  class Edge0To0 extends PathGenFromArray(M = 2, from0 = true, to0 = true, paths = Array(Seq(0, 0)))
+  class Edge0To0 extends PathGenFromArray(M = 2, from0 = true, to0 = true, paths = Array(Seq(0, 0)).map(mkPathData))
 
   /**
     * Generate paths by patching together two paths of approximately half the length.
@@ -234,12 +233,21 @@ case class Tsp(N: NodeT, d: (NodeT, NodeT) => DistanceT) {
     val rightLimit = 0
 
     // Paths already generated, in order of length
-    val paths = Buffer[PathT]()
+    val paths = Buffer[PathData]()
+
+    // Paths already generated, indexed on the triple of (head, set of internal nodes, last).
+    // Used to eliminate obviously inferior paths comprising the same two end-points,
+    //   and the same interior nodes in a different (and longer path) order.
+    val pathsByInteriorSet = MMap[(NodeT, Set[NodeT], NodeT), PathT]()
 
     // (left, right) pairs ordered by total length.
     val todo = MSortedSet[(Double, Int, Int)]()
     // Seed the todo list
     addTodo(iLeft = 0, iRight = 0)
+
+    // For debug
+    val pairsDone = Buffer[(Int, Int)]()
+    val pathPairs = Buffer[(Int, Int)]()
 
     // Add a left/right pair to the todo set
     def addTodo(iLeft: Int, iRight: Int): Unit = {
@@ -247,23 +255,23 @@ case class Tsp(N: NodeT, d: (NodeT, NodeT) => DistanceT) {
       val maybeRight = rightPaths.getPath(iRight)
       (maybeLeft, maybeRight) match {
         case (Some(left), Some(right)) =>
-          val item = (length(left) + length(right), iLeft, iRight)
+          val item = (length(left.path) + length(right.path), iLeft, iRight)
           todo += item
         case (_, _) => /*ignore - no more child paths*/
       }
       //println(s"                     todo -> ${todo}")
       //print("                         todo -> ")
-      todo.foreach { item =>
-        val(len, i, j) = item
-        val left = leftPaths.getPath(i).get
-        val right = rightPaths.getPath(j).get
-        //print(f"[$len%.4f $i = $left len ${length(left)}%.4f ++ $j = $right len ${length(right)}%.4f] ")
-      }
+      // todo.foreach { item =>
+      //   val(len, i, j) = item
+      //   val left = leftPaths.getPath(i).get
+      //   val right = rightPaths.getPath(j).get
+      //   print(f"[$len%.4f $i = $left len ${length(left)}%.4f ++ $j = $right len ${length(right)}%.4f] ")
+      // }
       //println
     }
 
 
-    override def getPath(i: Int): Option[PathT] = {
+    override def getPath(i: Int): Option[PathData] = {
 //println(s"RecursivePathGen($M, $from0, $to0).getPath($i) paths.size is ${paths.size}")
       fillTo(i)
       if(i < paths.size) Some(paths(i)) else None
@@ -273,11 +281,21 @@ case class Tsp(N: NodeT, d: (NodeT, NodeT) => DistanceT) {
       * Generate paths up to the i'th path.
       */
     def fillTo(i: Int): Unit = {
+      // if(M == N+1 && 0 < i) {
+      //   new Exception(s"N = $N M = $M from0 = $from0 to0 = $to0 - seeking path $i").printStackTrace(System.out)
+      // }
       if(paths.size <= i) {
         RecursivePathGen.this.synchronized {
           while(paths.size <= i && todo.nonEmpty) {
+            // println(s"                                        N = $N M = $M from0 = $from0 to0 = $to0 - seeking path $i")
             nextPair()
           }
+          // if(i < paths.size) {
+          //   println(s"                                        N = $N M = $M from0 = $from0 to0 = $to0 - path $i ${pathPairs(i)} = ${paths(i)}")
+          // }
+          // else {
+          //   println(s"                                        N = $N M = $M from0 = $from0 to0 = $to0 - no such path $i")
+          // }
         }
       }
     }
@@ -297,23 +315,87 @@ case class Tsp(N: NodeT, d: (NodeT, NodeT) => DistanceT) {
       val next = todo.head
       todo -= next
       val (len, iLeft, iRight) = next
+      //println(s"                                        N = $N M = $M from0 = $from0 to0 = $to0 -   looking at l/r pair ($iLeft, $iRight)")
+      val itemDone = (iLeft, iRight)
+      pairsDone += itemDone
       val left = leftPaths.getPath(iLeft).get
       val right = rightPaths.getPath(iRight).get
 //println(s"RecursivePathGen($M, $from0, $to0).nextPair: length $len for ($iLeft, $iRight) = $left ++ ${right.reverse}")
       // it's a match if the end point is the same and none of the middle points intersect
       if(left.last == right.head) {
         // Ok, we can patch them together as long as we don't repeat any other node
-        val leftInternalSet = internalNodeSet(left, ignoreHead = from0, ignoreLast = true)
-        val rightInternalSet = internalNodeSet(right, ignoreHead = true, ignoreLast = to0)
+        val leftInternalSet = internalNodeSet(left.path, ignoreHead = from0, ignoreLast = true)
+        val rightInternalSet = internalNodeSet(right.path, ignoreHead = true, ignoreLast = to0)
         if(leftInternalSet.intersect(rightInternalSet).isEmpty) {
           // Success - patch the left and right paths together
-          paths += left ++ right.tail
-          //println(s"                                    got him - length $len for path ${paths.length-1} = ${paths.last}")
+          val path = left.path ++ right.path.tail
+          val interiorNodeSet = path.tail.init.toSet
+          val key = (path.head, interiorNodeSet, path.last)
+          pathsByInteriorSet.get(key) match {
+            case None =>
+              // No better path through the same nodes - this is a genuine new path
+              //println(s"                                    got him - length $len for path ${paths.length-1} = ${paths.last}")
+              pathsByInteriorSet(key) = path
+              paths += mkPathData(path)
+              val pathPair = (iLeft, iRight)
+              pathPairs += pathPair
+            case Some(betterPath) =>
+              // Ignore this path - we already have a better one through the same nodes
+              //println(f"                              ignoring $path len ${length(path)}%.6f - $betterPath len ${length(betterPath)}%.6f is better")
+              // if(path == betterPath) {
+              //   println("                                                    !!!!!!!!!!! DUP")
+              // }
+          }
         }
       }
       // Now add the next pairs to the todo list (they might already be there)
       addTodo(iLeft, iRight+1)
       addTodo(iLeft+1, iRight)
+    }
+
+    override def dump: Unit = {
+      println(s"                          N = $N M = $M from0 = $from0 to0 = $to0:")
+      if(dumped) {
+        println("                                      [already dumped]")
+      }
+      else {
+        dumped = true
+
+        var i = 0
+        while(i < paths.length) {
+          val path = paths(i)
+          println(f"                                i = $i%3d len = ${length(path.path)}%.6f $path")
+          i = i+1
+        }
+      }
+    }
+
+    override def dumpRec: Unit = {
+      val alreadyDumped = dumped
+      dump
+
+      if(!alreadyDumped) {
+        var i = 0
+        pathPairs.foreach { case (iLeft, iRight) =>
+          val left = leftPaths.getPath(iLeft).get
+          val right = rightPaths.getPath(iRight).get
+          println(f"                                path $i%3d: ($iLeft%3d, $iRight%3d) = $left + $right len ${length(left.path) + length(right.path)}%.6f")
+          i = i+1
+        }
+        pairsDone.foreach { case (iLeft, iRight) =>
+          val left = leftPaths.getPath(iLeft).get
+          val right = rightPaths.getPath(iRight).get
+          println(f"                                     done ($iLeft%3d, $iRight%3d) = $left + $right len ${length(left.path) + length(right.path)}%.6f")
+        }
+        todo.foreach { case (_, iLeft, iRight) =>
+          val left = leftPaths.getPath(iLeft).get
+          val right = rightPaths.getPath(iRight).get
+          println(f"                                     todo ($iLeft%3d, $iRight%3d) = $left + $right len ${length(left.path) + length(right.path)}%.6f")
+        }
+
+        leftPaths.dumpRec
+        rightPaths.dumpRec
+      }
     }
   }
 
@@ -321,8 +403,12 @@ case class Tsp(N: NodeT, d: (NodeT, NodeT) => DistanceT) {
     * TSP by recursive minimum path generation and patching.
     */
   def pgMinHamCycle: PathT = {
-    getPathGen(M = N+1, from0 = true, to0 = true).getPath(0).get
+    val pathGen = getPathGen(M = N+1, from0 = true, to0 = true)
+    val result = pathGen.getPath(0).get
+    //pathGen.dumpRec
+    result.path.toList /*cos other ones end up with a list*/
   }
+
 }
 
 object Tsp {
@@ -342,9 +428,11 @@ object Tsp {
     println("Hello, world!")
   }
 
-  val MaxNForAvg = 12
-  val MaxNForBrute = 12
-  val MaxNForDp = 25
+  val MaxNForAvg = 10
+  val MaxNForBrute = 10
+  val MaxNForDp = 15
+  val MaxNForFold = 13
+  val MaxNForPg = 50
   val MaxNForGreedy = 1000
 
   def c(n1: NodeT, n2: NodeT) = 1.0
@@ -386,12 +474,12 @@ object Tsp {
         val dDpMinLen = tsp.length(dDpMin)
         println(f"   dp       $dDpMin -> $dDpMinLen%.6f")
       }
-      if(N <= MaxNForDp) time {
+      if(N <= MaxNForFold) time {
         val dFoldDpMin = tsp.foldDpMinHamCycle
         val dFoldDpMinLen = tsp.length(dFoldDpMin)
         println(f"   fold     $dFoldDpMin -> $dFoldDpMinLen%.6f")
       }
-      if(N <= MaxNForDp) time {
+      if(N <= MaxNForPg) time {
         val dPgMin = tsp.pgMinHamCycle
         val dPgMinLen = tsp.length(dPgMin)
         println(f"   path-gen $dPgMin -> $dPgMinLen%.6f")
