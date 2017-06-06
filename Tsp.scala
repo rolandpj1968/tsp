@@ -1,3 +1,4 @@
+import scala.collection.BitSet
 import scala.collection.mutable.{Buffer, Map => MMap, Set => MSet, SortedSet => MSortedSet}
 
 import TypeAliases._
@@ -174,9 +175,15 @@ case class Tsp(N: NodeT, d: (NodeT, NodeT) => DistanceT) {
     }
   }
 
-  case class PathData(head: NodeT, /*matchNodes: Set[NodeT],*/ last: NodeT, path: PathT)
+  case class PathData(head: NodeT, leftInners: BitSet, rightInners: BitSet, last: NodeT, path: PathT)
 
-  def mkPathData(path: PathT) = PathData(path.head, path.last, path.toArray/*force to array*/)
+  def mkPathData(path: PathT, from0: Boolean, to0: Boolean): PathData = {
+    val init = path.init
+    val leftInners = if(from0) init.tail else init
+    val tail = path.tail
+    val rightInners = if(to0) tail.init else tail
+    PathData(path.head, leftInners = BitSet(leftInners: _*), rightInners = BitSet(rightInners: _*), path.last, path.toArray/*force to array*/)
+  }
 
   /**
     * M is the number of nodes in a path, i.e. M-1 edges.
@@ -204,22 +211,22 @@ case class Tsp(N: NodeT, d: (NodeT, NodeT) => DistanceT) {
   /**
     * Single-edge paths in increasing order of length.
     */
-  class EdgesNon0 extends PathGenFromArray(M = 2, from0 = false, to0 = false, paths = edgesNon0.toArray.sortBy(length).map(mkPathData))
+  class EdgesNon0 extends PathGenFromArray(M = 2, from0 = false, to0 = false, paths = edgesNon0.toArray.sortBy(length).map(mkPathData(_, from0 = false, to0 = false)))
 
   /**
     * Single-edge edges from 0 in increasing order of length.
     */
-  class EdgesFrom0 extends PathGenFromArray(M = 2, from0 = true, to0 = false, paths = (1 to N-1).map { i => Seq(0, i) }.toArray.sortBy(length).map(mkPathData))
+  class EdgesFrom0 extends PathGenFromArray(M = 2, from0 = true, to0 = false, paths = (1 to N-1).map { i => Seq(0, i) }.toArray.sortBy(length).map(mkPathData(_, from0 = true, to0 = false)))
 
   /**
     * Single-edge edges from 0 in increasing order of length.
     */
-  class EdgesTo0 extends PathGenFromArray(M = 2, from0 = false, to0 = true, paths = (1 to N-1).map { i => Seq(i, 0) }.toArray.sortBy(length).map(mkPathData))
+  class EdgesTo0 extends PathGenFromArray(M = 2, from0 = false, to0 = true, paths = (1 to N-1).map { i => Seq(i, 0) }.toArray.sortBy(length).map(mkPathData(_, from0 = false, to0 = true)))
 
   /**
     * Pathological case edge 0 to 0
     */
-  class Edge0To0 extends PathGenFromArray(M = 2, from0 = true, to0 = true, paths = Array(Seq(0, 0)).map(mkPathData))
+  class Edge0To0 extends PathGenFromArray(M = 2, from0 = true, to0 = true, paths = Array(Seq(0, 0)).map(mkPathData(_, from0 = true, to0 = true)))
 
   /**
     * Generate paths by patching together two paths of approximately half the length.
@@ -238,7 +245,7 @@ case class Tsp(N: NodeT, d: (NodeT, NodeT) => DistanceT) {
     // Paths already generated, indexed on the triple of (head, set of internal nodes, last).
     // Used to eliminate obviously inferior paths comprising the same two end-points,
     //   and the same interior nodes in a different (and longer path) order.
-    val pathsByInteriorSet = MMap[(NodeT, Set[NodeT], NodeT), PathT]()
+    val pathsByInteriorSet = MMap[(NodeT, BitSet, NodeT), PathT]()
 
     // (left, right) pairs ordered by total length.
     val todo = MSortedSet[(Double, Int, Int)]()
@@ -324,19 +331,25 @@ case class Tsp(N: NodeT, d: (NodeT, NodeT) => DistanceT) {
       // it's a match if the end point is the same and none of the middle points intersect
       if(left.last == right.head) {
         // Ok, we can patch them together as long as we don't repeat any other node
-        val leftInternalSet = internalNodeSet(left.path, ignoreHead = from0, ignoreLast = true)
-        val rightInternalSet = internalNodeSet(right.path, ignoreHead = true, ignoreLast = to0)
-        if(leftInternalSet.intersect(rightInternalSet).isEmpty) {
+        // val leftInternalSet = internalNodeSet(left.path, ignoreHead = from0, ignoreLast = true)
+        // val rightInternalSet = internalNodeSet(right.path, ignoreHead = true, ignoreLast = to0)
+        // if(left.leftInners != leftInternalSet) {
+        //   println(s"BUG!!!! leftInners ${left.leftInners} != leftInternalSet $leftInternalSet")
+        // }
+        // if(right.rightInners != rightInternalSet) {
+        //   println(s"BUG!!!! rightInners ${right.rightInners} != rightInternalSet $rightInternalSet")
+        // }
+        if(left.leftInners.intersect(right.rightInners).isEmpty) {
           // Success - patch the left and right paths together
           val path = left.path ++ right.path.tail
-          val interiorNodeSet = path.tail.init.toSet
-          val key = (path.head, interiorNodeSet, path.last)
+          val inners = BitSet(path.tail.init: _*)
+          val key = (path.head, inners, path.last)
           pathsByInteriorSet.get(key) match {
             case None =>
               // No better path through the same nodes - this is a genuine new path
               //println(s"                                    got him - length $len for path ${paths.length-1} = ${paths.last}")
               pathsByInteriorSet(key) = path
-              paths += mkPathData(path)
+              paths += mkPathData(path, from0, to0)
               val pathPair = (iLeft, iRight)
               pathPairs += pathPair
             case Some(betterPath) =>
@@ -430,7 +443,7 @@ object Tsp {
 
   val MaxNForAvg = 10
   val MaxNForBrute = 10
-  val MaxNForDp = 15
+  val MaxNForDp = 50
   val MaxNForFold = 13
   val MaxNForPg = 50
   val MaxNForGreedy = 1000
