@@ -162,6 +162,9 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
 
   def getPathGen(M: Int, from0: Boolean = false, to0: Boolean = false): PathGen = {
     PathGenCache.synchronized {
+      if(from0 && to0) {
+        PathGenCache.clear
+      }
       PathGenCache.getOrElseUpdate((M, from0, to0), buildPathGen(M, from0, to0))
     }
   }
@@ -178,9 +181,14 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
     }
   }
 
+  val PathGenCache2 = MMap[(Int, Boolean, Boolean), PathGen]()
+
   def getPathGen2(M: Int, from0: Boolean = false, to0: Boolean = false): PathGen = {
-    PathGenCache.synchronized {
-      PathGenCache.getOrElseUpdate((M, from0, to0), buildPathGen2(M, from0, to0))
+    PathGenCache2.synchronized {
+      if(from0 && to0) {
+        PathGenCache2.clear
+      }
+      PathGenCache2.getOrElseUpdate((M, from0, to0), buildPathGen2(M, from0, to0))
     }
   }
 
@@ -310,6 +318,7 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
 
     override def getPath(i: Int): Option[PathData] = {
       fillTo(i)
+      println(f"                                                                                   pg2 0to0 i = $i: #lefts $iLeftNext #rights $iRightNext #pending ${pendingPaths.size}")
       if(i < paths.size) Some(paths(i)) else None
     }
 
@@ -331,10 +340,10 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
       leftPathGen.getPath(iLeftNext) match {
         case None =>
           leftDone = true
-          println(s"                                         left done after $iLeftNext subpaths")
+          // println(s"                                         left done after $iLeftNext subpaths")
         case Some(pathData) =>
           leftNext = pathData
-          println(f"                                         left $iLeftNext = ${pathData.path.toList} len ${pathData.length}%.4f")
+          // println(f"                                         left $iLeftNext = ${pathData.path.toList} len ${pathData.length}%.4f")
       }
     }
 
@@ -343,10 +352,10 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
       rightPathGen.getPath(iRightNext) match {
         case None =>
           rightDone = true
-          println(f"                                                                                                         right done after $iRightNext subpaths")
+          // println(f"                                                                                                         right done after $iRightNext subpaths")
         case Some(pathData) =>
           rightNext = pathData
-          println(f"                                                                                                         right $iRightNext = ${pathData.path.toList} len ${pathData.length}%.4f")
+          // println(f"                                                                                                         right $iRightNext = ${pathData.path.toList} len ${pathData.length}%.4f")
       }
     }
 
@@ -377,8 +386,11 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
       val left = leftPathGen.getPath(iLeft).get
       val right = rightPathGen.getPath(iRight).get
       val pendingPath = (left.length + right.length, iLeft, iRight)
+      if(paths.isEmpty && pendingPaths.isEmpty) {
+        println(f"                                                                                first pending path left #${iLeft} right #${iRight} #lefts ${iLeftNext} #rights ${iRightNext} - len ${pendingPath._1}%.4f ${left.path.toList} + ${right.path.toList}")
+      }
       pendingPaths += pendingPath
-      println(f"                                         added pending path len ${pendingPath._1}%.4f ${left.path.toList} + ${right.path.toList}")
+      // println(f"                                         added pending path len ${pendingPath._1}%.4f ${left.path.toList} + ${right.path.toList}")
       updateMinPendingLengths()
     }
 
@@ -388,7 +400,7 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
       val minRight = rightPathGen.getPath(minIRight).get
       minPendingLeftLength = minLeft.length
       minPendingRightLength = minRight.length
-      println(f"                                         min(pending) is now len $minLength%.4f ${minLeft.path.toList} + ${minRight.path.toList}")
+      // println(f"                                         min(pending) is now len $minLength%.4f ${minLeft.path.toList} + ${minRight.path.toList}")
     }
 
     def doNextPending(): Unit = {
@@ -397,11 +409,12 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
       val(length, iLeft, iRight) = nextPath
       val left = leftPathGen.getPath(iLeft).get
       val right = rightPathGen.getPath(iRight).get
+      println(f"                                                                              releasing $iLeft len ${left.length}%.4f + $iRight len ${right.length}%.4f min ($minLeftLength%.4f $minRightLength%.4f) next $iLeftNext len ${leftNext.length}%.4f $iRightNext len ${rightNext.length}%.4f")
       addPath(left, right)
-      println(f"                                         removed pending path len ${nextPath._1}%.4f ${left.path.toList} + ${right.path.toList}")
+      // println(f"                                         removed pending path len ${nextPath._1}%.4f ${left.path.toList} + ${right.path.toList}")
 
       if(pendingPaths.isEmpty) {
-        println(f"                                         pending is now empty")
+        // println(f"                                         pending is now empty")
       }
       else {
         updateMinPendingLengths()
@@ -413,8 +426,8 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
       val path = left.path ++ right.path.tail
       val inners = BitSet(path.tail.init: _*)
       val key = (path.head, inners, path.last)
-      println(f"                       released path len ${left.length + right.length}%.4f - ${left.path.toList} + ${right.path.toList}")
-      println(f"                       after #lefts $iLeftNext and #rights $iRightNext - still ${pendingPaths.size} pending")
+      // println(f"                       released path len ${left.length + right.length}%.4f - ${left.path.toList} + ${right.path.toList}")
+      // println(f"                       after #lefts $iLeftNext and #rights $iRightNext - still ${pendingPaths.size} pending")
       pathsByInteriorSet.get(key) match {
         case None =>
           // No better path through the same nodes - this is a genuine new path
@@ -422,7 +435,7 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
           paths += mkPathData(path, from0 = true, to0 = true)
         case Some(betterPath) =>
           // Ignore this path - we already have a better one through the same nodes
-          println(f"                       ignored - we already have len ${length(betterPath)}%.4f ${betterPath.toList}")
+          // println(f"                       ignored - we already have len ${length(betterPath)}%.4f ${betterPath.toList}")
       }
     }
 
@@ -441,7 +454,7 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
     }
 
     def doNext(): Unit = {
-      //println(s"look at new pair $iLeftNext and $iRightNext")
+      //// println(s"look at new pair $iLeftNext and $iRightNext")
       if(iLeftNext == 0 && iRightNext == 0) {
         // Seed with the first left and right
         doNextLeft()
@@ -449,25 +462,29 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
       }
       else {
         // First priority is releasing a pending path
+        val minPendingLength = minPendingLeftLength + minPendingRightLength
         if(pendingPaths.nonEmpty
-          && (leftDone || minPendingLeftLength - minLeftLength <= leftNext.length - minPendingLeftLength)
-          && (rightDone || minPendingRightLength - minRightLength <= rightNext.length - minPendingRightLength)) {
+          /*&& (leftDone || minPendingLeftLength - minLeftLength <= leftNext.length - minPendingLeftLength)
+           && (rightDone || minPendingRightLength - minRightLength <= rightNext.length - minPendingRightLength)*/
+           && (leftDone || minPendingLength <= leftNext.length + minRightLength)
+           && (rightDone || minPendingLength <= minLeftLength + rightNext.length)
+        ) {
 
-          println("          doing next pending")
+          // println("          doing next pending")
           doNextPending()
         }
         else {
           // Move either the left or right forward by 1
           if(leftDone) {
-            println("          left done - doing right")
+            // println("          left done - doing right")
             doNextRight()
           }
           else if(rightDone) {
-            println("          right done - doing left")
+            // println("          right done - doing left")
             doNextLeft()
           }
           else {
-            println(f"         left $iLeftNext len ${leftNext.length}%.4f + min(right) $minRightLength%.4f < min(left) $minLeftLength%.4f + right $iRightNext ${rightNext.length}%.4f")
+            // println(f"         left $iLeftNext len ${leftNext.length}%.4f + min(right) $minRightLength%.4f < min(left) $minLeftLength%.4f + right $iRightNext ${rightNext.length}%.4f")
             if(leftNext.length + minRightLength < minLeftLength + rightNext.length) {
               doNextLeft()
             }
@@ -487,8 +504,10 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
   class RecursivePathGen(M: Int, from0: Boolean, to0: Boolean)
       extends PathGen(M, from0, to0) {
     val leftPaths = getPathGen((M+2)/2, from0, to0 = false)
+    var iLeftMax = 0
 
     val rightPaths = getPathGen((M+1)/2, from0 = false, to0)
+    var iRightMax = 0
 
     // Paths already generated, in order of length
     val paths = Buffer[PathData]()
@@ -502,6 +521,8 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
     val todo = MSortedSet[(Double, Int, Int)]()
     // Seed the todo list
     addTodo(iLeft = 0, iRight = 0)
+
+    var nDone = 0
 
     // Add a left/right pair to the todo set
     def addTodo(iLeft: Int, iRight: Int): Unit = {
@@ -518,6 +539,11 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
 
     override def getPath(i: Int): Option[PathData] = {
       fillTo(i)
+      if(from0 && to0) {
+        val currLeft = leftPaths.getPath(iLeftMax).get
+        val currRight = rightPaths.getPath(iRightMax).get
+        println(f"                                                                                   pg 0to0 i = $i: #lefts $iLeftMax #rights $iRightMax #done $nDone #todo ${todo.size} curr left len ${currLeft.length}%.4f right leng ${currRight.length}%.4f")
+      }
       if(i < paths.size) Some(paths(i)) else None
     }
 
@@ -531,6 +557,8 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
     }
 
     def nextPair(): Unit = {
+      nDone = nDone + 1
+
       // Remove the next shortest left/right pair from the todo set - it might not actually be a matching pair
       val next = todo.head
       todo -= next
@@ -539,6 +567,9 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
 
       val left = leftPaths.getPath(iLeft).get
       val right = rightPaths.getPath(iRight).get
+
+      if(iLeftMax < iLeft) iLeftMax = iLeft
+      if(iRightMax < iRight) iRightMax = iRight
 
       // it's a match if the end point is the same and none of the middle points intersect
       if(left.last == right.head) {
@@ -784,7 +815,7 @@ object Tsp {
   val MaxNForBrute = 10
   val MaxNForDp = 22
   val MaxNForFold = 13
-  val MaxNForPg = 15
+  val MaxNForPg = 22
   val MaxNForPg2 = 1000
   val MaxNForGreedy = 1000
 
@@ -808,7 +839,7 @@ object Tsp {
 
   println("Random d(i,j)")
 
-  for(N <- 2 to 1/*25*/) {
+  for(N <- 2 to 1000/*25*/) {
     println(s"----------------- N = $N --------------------")
     for (i <- 1 to 2) {
       println()
@@ -847,11 +878,13 @@ object Tsp {
         println(f"   fold     $dFoldDpMin -> $dFoldDpMinLen%.6f")
       }
       if(N <= MaxNForPg) time {
+        println(f"   path-gen...")
         val dPgMin = tsp.pgMinHamCycle
         val dPgMinLen = tsp.length(dPgMin)
         println(f"   path-gen $dPgMin -> $dPgMinLen%.6f")
       }
       if(N <= MaxNForPg2) time {
+        println(f"   pg2...")
         val dPg2Min = tsp.pg2MinHamCycle
         val dPg2MinLen = tsp.length(dPg2Min)
         println(f"   pg2      $dPg2Min -> $dPg2MinLen%.6f")
