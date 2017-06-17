@@ -218,6 +218,29 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
     }
   }
 
+  class Pg3x2Factory extends CachingPathGenFactory {
+    val pg3Factory = new Pg3Factory
+
+    def buildPathGen(M: Int, from0: Boolean, to0: Boolean): PathGen = {
+      //println(s"buildPathGen($M, $from0, $to0)")
+      (M, from0, to0) match {
+        case (2, false, false) => new EdgesNon0
+        case (2, false, true) => new EdgesTo0
+        case (2, true, false) => new EdgesFrom0
+        case (2, true, true) => new Edge0To0
+
+        case (_, true, true) => new RecursivePathGen2From0To0(Pg3x2Factory.this)
+        case (_, _, _) =>
+          if(3 < M) {
+            new RecursivePathGen3x2(M, from0, to0, Pg3x2Factory.this)
+          }
+          else {
+            pg3Factory.buildPathGen(M, from0, to0)
+          }
+      }
+    }
+  }
+
   case class PathData(head: NodeT, leftInners: BitSet, rightInners: BitSet, last: NodeT, path: PathT, length: DistanceT)
 
   def mkPathData(path: PathT, from0: Boolean, to0: Boolean): PathData = {
@@ -797,6 +820,287 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
 
   }
 
+  case class PathData2(head: NodeT, head2: NodeT, leftInners: BitSet, rightInners: BitSet, last: NodeT, last2: NodeT, path: PathT, length: DistanceT)
+
+  def mkPathData2(path: PathT, from0: Boolean, to0: Boolean): PathData2 = {
+    val init = path.init
+    val leftInners = if(from0) init.tail else init
+    val tail = path.tail
+    val rightInners = if(to0) tail.init else tail
+    PathData2(path.head, tail.head, leftInners = BitSet(leftInners: _*), rightInners = BitSet(rightInners: _*), init.last, path.last, path.toArray, length(path))
+  }
+
+  /**
+    * Generate paths by patching together two paths of approximately half the length.
+    * For the special case of the top-level PathGen, we can immediately match
+    *   left & right paths by their last and head node, respectively, and the inverse
+    *   of their internal nodes.
+    * Use two nodes for the patch point.
+    */
+  class RecursivePathGen3x2(M: Int, from0: Boolean, to0: Boolean, factory: PathGenFactory)
+      extends PathGen(M, from0, to0) {
+
+    val leftPathGen = factory.getPathGen((M+3)/2, from0, to0 = false)
+
+    val rightPathGen = factory.getPathGen((M+2)/2, from0 = false, to0)
+
+    // leftPathsByLast(last-node) = indexes of left paths ending in last-node
+    val leftPathsByLast = Array.fill(N,N) { Buffer[Int]() }
+
+    // rightPathsByFirst(first-node) = indexes of right paths beginning with last-node
+    val rightPathsByFirst = Array.fill(N,N) { Buffer[Int]() }
+
+    // Seed the left paths
+    var leftDone = false
+    var iLeftNext = 0
+    var leftNext: PathData2 = mkPathData2(leftPathGen.getPath(0).get.path, from0, to0)
+    val minLeftLength = leftNext.length
+
+    // Seed the right paths
+    var rightDone = false
+    var iRightNext = 0
+    var rightNext: PathData2 = mkPathData2(rightPathGen.getPath(0).get.path, from0, to0)
+    val minRightLength = rightNext.length
+
+    val allNon0NodesBitset = BitSet((1 to N-1): _*)
+
+    // Paths pending release, ordered by path length.
+    // A path is released (published) once we have looked far enough forward in both left and right
+    //   subpaths to prove that there can be no shorter path.
+    // Set(length, left-index, right-index, linkNode1, linkNode2, left-max, right-max)
+    val pendingPaths = MSortedSet[(DistanceT, Int, Int, NodeT, NodeT, Int, Int, Int)]()
+    var minPendingLeftLength = 0.0
+    var minPendingRightLength = 0.0
+
+    // Paths already generated, indexed on the triple of (head, set of internal nodes, last).
+    // Used to eliminate obviously inferior paths comprising the same two end-points,
+    //   and the same interior nodes in a different (and longer path) order.
+    val pathsByInteriorSet = MMap[(NodeT, BitSet, NodeT), PathT]()
+    var nDone = 0
+    var nClashes = 0
+    var nDups = 0
+
+    // Paths already generated, in order of length - we typically only generate paths(0) since that is the TSP solution
+    val paths = Buffer[PathData2]()
+
+    override def dumpStats(indent: Int): Unit = {
+      (0 to indent).foreach { i => print("  ") }
+      println(f"                                                                                   pg3x2 $M:${if(from0)"0"else"x"}-${if(to0)"0"else"x"} #paths ${paths.size} #lefts $iLeftNext #rights $iRightNext #done ${nDone} #dups ${nDups} #pending ${pendingPaths.size} #clashes ${nClashes}")
+      // paths.foreach { pd =>
+      //   (0 to indent).foreach { i => print("  ") }
+      //   println(f"                                                                                         ${pd.length}%.4f ${pd.path}")
+      // }
+      leftPathGen.dumpStats(indent+1)
+      rightPathGen.dumpStats(indent+1)
+    }
+
+    override def getPath(i: Int): Option[PathData] = {
+      fillTo(i)
+      //println(f"                                                                                   pg2 0to0 i = $i: #lefts $iLeftNext #rights $iRightNext #pending ${pendingPaths.size}")
+      if(i < paths.size) Some(mkPathData(paths(i).path, from0, to0)) else None
+    }
+
+    def inverseNodeSet(nodeSet: BitSet, edgeNode: NodeT): BitSet = {
+      allNon0NodesBitset -- nodeSet - edgeNode
+    }
+
+    /**
+      * Generate paths up to the i'th path.
+      */
+    def fillTo(i: Int): Unit = {
+      while(paths.size <= i && (pendingPaths.nonEmpty || !leftDone || !rightDone)) {
+        doNext()
+      }
+    }
+
+    def bumpLeft(): Unit = {
+      iLeftNext = iLeftNext + 1
+      leftPathGen.getPath(iLeftNext) match {
+        case None =>
+          leftDone = true
+          // println(s"                                         left done after $iLeftNext subpaths")
+        case Some(pathData) =>
+          leftNext = mkPathData2(pathData.path, from0, to0)
+          // println(f"                                         left $iLeftNext = ${pathData.path.toList} len ${pathData.length}%.4f")
+      }
+    }
+
+    def bumpRight(): Unit = {
+      iRightNext = iRightNext + 1
+      rightPathGen.getPath(iRightNext) match {
+        case None =>
+          rightDone = true
+          // println(f"                                                                                                         right done after $iRightNext subpaths")
+        case Some(pathData) =>
+          rightNext = mkPathData2(pathData.path, from0, to0)
+          // println(f"                                                                                                         right $iRightNext = ${pathData.path.toList} len ${pathData.length}%.4f")
+      }
+    }
+
+    def addLeft(iLeft: Int, left: PathData2): Unit = {
+      // Add to the left cache
+      leftPathsByLast(left.last)(left.last2) += iLeft
+
+      // Add first right match
+      val rightMatches = rightPathsByFirst(left.last)(left.last2)
+      if(rightMatches.nonEmpty) {
+        addPendingPath(iLeft, iRight = rightMatches(0), linkNode = left.last, linkNode2 = left.last2, iLeftMatch = -1, iRightMatch = 0, iMatchLimit = rightMatches.size)
+      }
+    }
+
+    def addRight(iRight: Int, right: PathData2): Unit = {
+      rightPathsByFirst(right.head)(right.head2) += iRight
+
+      // Add first left match
+      val leftMatches = leftPathsByLast(right.head)(right.head2)
+      if(leftMatches.nonEmpty) {
+        addPendingPath(iLeft = leftMatches(0), iRight, linkNode = right.head, linkNode2 = right.head2, iLeftMatch = 0, iRightMatch = -1, iMatchLimit = leftMatches.size)
+      }
+    }
+
+    def addPendingPath(iLeft: Int, iRight: Int, linkNode: NodeT, linkNode2: NodeT, iLeftMatch: Int, iRightMatch: Int, iMatchLimit: Int): Unit = {
+      val left = leftPathGen.getPath(iLeft).get
+      val right = rightPathGen.getPath(iRight).get
+      val pendingPath = (left.length + right.length, iLeft, iRight, linkNode, linkNode2, iLeftMatch, iRightMatch, iMatchLimit)
+      // if(paths.isEmpty && pendingPaths.isEmpty) {
+      //   println(f"                                                                                                    first pending path left #${iLeft} right #${iRight} #lefts ${iLeftNext} #rights ${iRightNext} - len ${pendingPath._1}%.4f ${left.path.toList} + ${right.path.toList}")
+      // }
+      pendingPaths += pendingPath
+      // println(f"                                         added pending path len ${pendingPath._1}%.4f ${left.path.toList} + ${right.path.toList}")
+      updateMinPendingLengths()
+    }
+
+    def updateMinPendingLengths(): Unit = {
+      val (minLength, minILeft, minIRight, _, _, _, _, _) = pendingPaths.head
+      val minLeft = leftPathGen.getPath(minILeft).get
+      val minRight = rightPathGen.getPath(minIRight).get
+      minPendingLeftLength = minLeft.length
+      minPendingRightLength = minRight.length
+      // println(f"                                         min(pending) is now len $minLength%.4f ${minLeft.path.toList} + ${minRight.path.toList}")
+    }
+
+    def doNextPending(): Unit = {
+      nDone = nDone + 1
+      val nextPath = pendingPaths.head
+      pendingPaths -= nextPath
+      val (length, iLeft, iRight, linkNode, linkNode2, iLeftMatch, iRightMatch, iMatchLimit) = nextPath
+      val left = mkPathData2(leftPathGen.getPath(iLeft).get.path, from0, to0)
+      val right = mkPathData2(rightPathGen.getPath(iRight).get.path, from0, to0)
+      //println(f"                                                                              releasing $iLeft len ${left.length}%.4f + $iRight len ${right.length}%.4f min ($minLeftLength%.4f $minRightLength%.4f) next $iLeftNext len ${leftNext.length}%.4f $iRightNext len ${rightNext.length}%.4f")
+      addPath(left, right)
+      // println(f"                                         removed pending path len ${nextPath._1}%.4f ${left.path.toList} + ${right.path.toList}")
+
+      // Add the next match, if there is one
+      if(iLeftMatch != -1) {
+        val iMatchNext = iLeftMatch + 1
+        if(iMatchNext < iMatchLimit) {
+          val leftMatches = leftPathsByLast(linkNode)(linkNode2)
+          val iLeftNext = leftMatches(iMatchNext)
+          addPendingPath(iLeftNext, iRight, linkNode, linkNode2, iMatchNext, iRightMatch, iMatchLimit)
+        }
+      }
+
+      if(iRightMatch != -1) {
+        val iMatchNext = iRightMatch + 1
+        if(iMatchNext < iMatchLimit) {
+          val rightMatches = rightPathsByFirst(linkNode)(linkNode2)
+          val iRightNext = rightMatches(iMatchNext)
+          addPendingPath(iLeft, iRightNext, linkNode, linkNode2, iLeftMatch, iMatchNext, iMatchLimit)
+        }
+      }
+
+      if(pendingPaths.isEmpty) {
+        // println(f"                                         pending is now empty")
+      }
+      else {
+        updateMinPendingLengths()
+      }
+    }
+
+    def addPath(left: PathData2, right: PathData2): Unit = {
+      // We can patch them together as long as we don't visit any node twice
+      if(left.leftInners.intersect(right.rightInners).isEmpty) {
+        // Success - patch the left and right paths together
+        val path = left.path ++ right.path.tail.tail
+        val inners = BitSet(path.tail.init: _*)
+        val key = (path.head, inners, path.last)
+        //println(f"                       released path len ${left.length + right.length}%.4f - ${path.toList} = ${left.path.toList} + ${right.path.toList} ... l.leftInners ${left.leftInners} r.rightInners ${right.rightInners}")
+        // println(f"                       after #lefts $iLeftNext and #rights $iRightNext - still ${pendingPaths.size} pending")
+        pathsByInteriorSet.get(key) match {
+          case None =>
+            // No better path through the same nodes - this is a genuine new path
+            pathsByInteriorSet(key) = path
+            paths += mkPathData2(path, from0, to0)
+          case Some(betterPath) =>
+            // Ignore this path - we already have a better one through the same nodes
+            nDups = nDups + 1
+            // println(f"                       ignored - we already have len ${length(betterPath)}%.4f ${betterPath.toList}")
+        }
+      }
+      else {
+        nClashes = nClashes + 1
+      }
+    }
+
+    def doNextLeft(): Unit = {
+      val iLeft = iLeftNext
+      val left = leftNext
+      bumpLeft()
+      addLeft(iLeft, left)
+    }
+
+    def doNextRight(): Unit = {
+      val iRight = iRightNext
+      val right = rightNext
+      bumpRight()
+      addRight(iRight, right)
+    }
+
+    def doNext(): Unit = {
+      //// println(s"look at new pair $iLeftNext and $iRightNext")
+      if(iLeftNext == 0 && iRightNext == 0) {
+        // Seed with the first left and right
+        doNextLeft()
+        doNextRight()
+      }
+      else {
+        // First priority is releasing a pending path
+        val minPendingLength = minPendingLeftLength + minPendingRightLength
+        if(pendingPaths.nonEmpty
+          /*&& (leftDone || minPendingLeftLength - minLeftLength <= leftNext.length - minPendingLeftLength)
+           && (rightDone || minPendingRightLength - minRightLength <= rightNext.length - minPendingRightLength)*/
+           && (leftDone || minPendingLength <= leftNext.length + minRightLength)
+           && (rightDone || minPendingLength <= minLeftLength + rightNext.length)
+        ) {
+
+          // println("          doing next pending")
+          doNextPending()
+        }
+        else {
+          // Move either the left or right forward by 1
+          if(leftDone) {
+            // println("          left done - doing right")
+            doNextRight()
+          }
+          else if(rightDone) {
+            // println("          right done - doing left")
+            doNextLeft()
+          }
+          else {
+            // println(f"         left $iLeftNext len ${leftNext.length}%.4f + min(right) $minRightLength%.4f < min(left) $minLeftLength%.4f + right $iRightNext ${rightNext.length}%.4f")
+            if(leftNext.length + minRightLength < minLeftLength + rightNext.length) {
+              doNextLeft()
+            }
+            else {
+              doNextRight()
+            }
+          }
+        }
+      }
+    }
+
+  }
+  
   /**
     * Generate paths by patching together two paths of approximately half the length.
     */
@@ -907,184 +1211,6 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
     }
   }
 
-  // case class MatchingPair(length: Double, iLeft: Int, iRight: Int, iLeftPathsByLast: Int, iRightPathsByHead: Int)
-
-  // /**
-  //   * Generate paths by patching together two paths of approximately half the length.
-  //   * We partition left path by last node, and right path by head node, so that
-  //   *   we reduce the number of pairs considered.
-  //   */
-  // class RecursivePathGen2(M: Int, from0: Boolean, to0: Boolean)
-  //     extends PathGen(M, from0, to0) {
-
-  //   val leftPaths = getPathGen((M+2)/2, from0, to0 = false)
-  //   // Seed the left paths
-  //   var iLeftNext = 0
-  //   var leftNext: PathData = leftPaths.getPath(0).get
-  //   val minLeftLength = leftNext.length
-  //   // map: last-node -> sequence of paths with that last-node, as generated in length-order
-  //   val leftPathsByLast = MMap[NodeT, Buffer[(Double, Int)]]()
-
-  //   val rightPaths = getPathGen((M+1)/2, from0 = false, to0)
-  //   var iRightNext = 0
-  //   var rightNext: PathData = rightPaths.getPath(0).get
-  //   val minRightLength = rightNext.length
-  //   // map: head-node -> sequence of paths with that last-node, as generated in length-order
-  //   val rightPathsByHead = MMap[NodeT, Buffer[(Double, Int)]]()
-
-  //   // The combined path length of the last pair considered
-  //   var currPairLength = 0.0
-
-  //   // Paths already generated, in order of length
-  //   val paths = Buffer[PathData]()
-
-  //   // Paths already generated, indexed on the triple of (head, set of internal nodes, last).
-  //   // Used to eliminate obviously inferior paths comprising the same two end-points,
-  //   //   and the same interior nodes in a different (and longer path) order.
-  //   val pathsByInteriorSet = MMap[(NodeT, BitSet, NodeT), PathT]()
-
-  //   // (left, right) pairs ordered by total length.
-  //   // These are only left/right pairs whose last and head match,
-  //   //   and only the shortest such pair by combined length.
-  //   val todo = MSortedSet[MatchingPair]()
-  //   var nextTodoLength = 0.0
-
-  //   // Add a left/right pair to the todo set
-  //   // def addTodo(iLeft: Int, iRight: Int): Unit = {
-  //   //   val maybeLeft = leftPaths.getPath(iLeft)
-  //   //   val maybeRight = rightPaths.getPath(iRight)
-  //   //   (maybeLeft, maybeRight) match {
-  //   //     case (Some(left), Some(right)) =>
-  //   //       val item = (left.length + right.length, iLeft, iRight)
-  //   //       todo += item
-  //   //     case (_, _) => /*ignore - no more child paths*/
-  //   //   }
-  //   // }
-
-  //   override def getPath(i: Int): Option[PathData] = {
-  //     fillTo(i)
-  //     if(i < paths.size) Some(paths(i)) else None
-  //   }
-
-  //   /**
-  //     * Generate paths up to the i'th path.
-  //     */
-  //   def fillTo(i: Int): Unit = {
-  //     if(paths.size <= i) {
-  //       while(paths.size <= i && todo.nonEmpty) {
-  //         nextPair()
-  //       }
-  //     }
-  //   }
-
-  //   def nextPair(): Unit = {
-  //     // We have three possible sources for the next pair, by minimum combined length
-  //     //    1. The todo set of matching pairs.
-  //     //    2. Next new left path combined with the shortest right path
-  //     //    3. Next new right path combined with the shortest left path
-  //     val newLeftLength = leftNext.length + minRightLength
-  //     val newRightLength = rightNext.length + minLeftLength
-
-  //     if(todo.nonEmpty && nextTodoLength < newLeftLength && nextTodoLength < newRightLength) {
-  //       nextTodo()
-  //     }
-  //     else if(newLeftLength < newRightLength) {
-  //       nextLeft()
-  //     }
-  //     else {
-  //       nextRight()
-  //     }
-  //   }
-
-  //   def nextLeft(): Unit = {
-  //     iLeftNext = iLeftNext + 1
-  //     leftNext = leftPaths.getPath(iLeftNext).get // TODO handle None
-
-  //   }
-
-  //   def nextRight(): Unit = {
-  //   }
-
-  //   def nextTodo(): Unit = {
-  //     // Remove the next shortest left/right pair from the todo set
-  //     val next = todo.head
-  //     todo -= next
-
-  //     val iLeft = next.iLeft
-  //     val iRight = next.iRight
-
-  //     val left = leftPaths.getPath(iLeft).get
-  //     val right = rightPaths.getPath(iRight).get
-
-  //     // it's a match if the end point is the same and none of the middle points intersect
-  //     if(left.last != right.head) {
-  //       println(s"                                 BUG BUG BUG $left and $right don't match TODO")
-  //     }
-
-  //     // Ok, we can patch them together as long as we don't visit any node twice
-  //     if(left.leftInners.intersect(right.rightInners).isEmpty) {
-  //       // Success - patch the left and right paths together
-  //       val path = left.path ++ right.path.tail
-  //       val inners = BitSet(path.tail.init: _*)
-  //       val key = (path.head, inners, path.last)
-  //       pathsByInteriorSet.get(key) match {
-  //         case None =>
-  //           // No better path through the same nodes - this is a genuine new path
-  //           pathsByInteriorSet(key) = path
-  //           paths += mkPathData(path, from0, to0)
-  //         case Some(betterPath) =>
-  //           // Ignore this path - we already have a better one through the same nodes
-  //       }
-  //     }
-
-  //     // Add the matching pair comprising the next left path with the same last node with this right path
-  //     val iLeftPathsByLast = next.iLeftPathsByLast
-  //     val leftPaths = leftPathsByLast(left.last)
-  //     if(leftPaths.size <= iLeftPathsByLast) {
-  //       // No more left paths with the same last node
-  //       TODO
-  //     }
-  //     else {
-  //       // Add the next left path with this last node to the todo list.
-  //       val (length, iLeftNext) = leftPaths(iLeftPathsByLast+1)
-  //       addToTodo(iLeftNext, iLeftPathsByLast+1, iRight, next.iRightPathsByHead)
-  //     }
-
-  //     // Add the matching pair comprising this left path with the next right path with the same head node
-  //     val iRightPathsByHead = next.iRightPathsByHead
-  //     val rightPaths = rightPathsByHead(right.head)
-  //     if(rightPaths.size <= iRightPathsByHead) {
-  //       // No more right paths with the same head node
-  //       TODO
-  //     }
-  //     else {
-  //       // Add the next right path with this head node to the todo list.
-  //       val (length, iRightNext) = rightPaths(iRightPathsByHead+1)
-  //       addToTodo(iLeft, next.iLeftPathsByLast, iRightNext, iRightPathsByHead+1)
-  //     }
-
-  //     // And update the cached nextTodoLength
-  //     updateNextTodoLength()
-  //   }
-
-  //   def TODO: Unit = { println("                               TODO TODO TODO") }
-
-  //   def addToTodo(iLeft: Int, iLeftPathsByLast: Int, iRight: Int, iRightPathsByHead: Int): Unit = {
-  //     val left = leftPaths.getPath(iLeft).get
-  //     val right = rightPaths.getPath(iRight).get
-
-  //     if(left.last != right.head) {
-  //       println(s"                                 BUG BUG BUG $left and $right don't match TODO")
-  //     }
-
-  //     todo += MatchingPair(left.length + right.length, iLeft, iRight, iLeftPathsByLast, iRightPathsByHead)
-  //   }
-
-  //   def updateNextTodoLength(): Unit = {
-  //     nextTodoLength = if(todo.isEmpty) 0.0 else todo.head.length
-  //   }
-  // }
-
   /**
     * TSP by recursive minimum path generation and patching.
     */
@@ -1104,10 +1230,17 @@ case class Tsp(N: Int, d: (NodeT, NodeT) => DistanceT) {
     result.path.toList /*cos other ones end up with a list*/
   }
 
-
   def pg3MinHamCycle: PathT = {
     val pg3Factory = new Pg3Factory
     val pathGen = pg3Factory.getPathGen(M = N+1, from0 = true, to0 = true)
+    val result = pathGen.getPath(0).get
+    pathGen.dumpStats(0)
+    result.path.toList /*cos other ones end up with a list*/
+  }
+
+  def pg3x2MinHamCycle: PathT = {
+    val pg3x2Factory = new Pg3x2Factory
+    val pathGen = pg3x2Factory.getPathGen(M = N+1, from0 = true, to0 = true)
     val result = pathGen.getPath(0).get
     pathGen.dumpStats(0)
     result.path.toList /*cos other ones end up with a list*/
@@ -1145,6 +1278,7 @@ object Tsp {
   val MaxNForPg2N = 40
   val MaxNForPg3 = 0
   val MaxNForPg3N = 40
+  val MaxNForPg3x2N = 40
   val MaxNForGreedy = 1000
 
   def c(n1: NodeT, n2: NodeT) = 1.0
@@ -1239,6 +1373,11 @@ object Tsp {
         val dPg3NormMin = tspNorm.pg3MinHamCycle
         val dPg3NormMinLen = tsp.length(dPg3NormMin)
         println(f"N: pg3      $dPg3NormMin -> $dPg3NormMinLen%.6f")
+      }
+      if(N <= MaxNForPg3x2N) time {
+        val dPg3x2NormMin = tspNorm.pg3x2MinHamCycle
+        val dPg3x2NormMinLen = tsp.length(dPg3x2NormMin)
+        println(f"N: pg3x2    $dPg3x2NormMin -> $dPg3x2NormMinLen%.6f")
       }
       // if(N <= MaxNForPg) time {
       //   val dPgDenMin = tspDen.pgMinHamCycle
